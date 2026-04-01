@@ -1,90 +1,115 @@
-from flask import Flask, request, jsonify, render_template_string
-import sqlite3
+from flask import Flask, request, jsonify, session, redirect, url_for
 import os
+import pickle
+import sqlite3
 import subprocess
 
 app = Flask(__name__)
 
-# VULNERABILITY 1: Hardcoded Secret (CWE-798)
-# An AI should identify this and move it to os.environ.get()
-SUPER_SECRET_PAYMENT_API_KEY = "sk_live_9382749823749823748923"
+# VULNERABILITY 1: Hardcoded Secret Key (CWE-798)
+app.secret_key = "super_secret_flask_key_12345"
 
-def init_db():
-    conn = sqlite3.connect('database.db')
+# VULNERABILITY 2: Insecure Direct Object Reference (IDOR) (CWE-639)
+# No authentication check — anyone can access any profile
+@app.route('/profile')
+def profile():
+    user_id = request.args.get('id')
+    conn = sqlite3.connect("database.db")
     cursor = conn.cursor()
-    cursor.execute('''CREATE TABLE IF NOT EXISTS users (id INTEGER, username TEXT, email TEXT, role TEXT)''')
-    cursor.execute("INSERT INTO users VALUES (1, 'alice', 'alice@admin.com', 'admin')")
-    cursor.execute("INSERT INTO users VALUES (2, 'bob', 'bob@user.com', 'user')")
-    conn.commit()
-    conn.close()
+    cursor.execute(f"SELECT username, email FROM users WHERE id = {user_id}")
+    data = cursor.fetchone()
+    return jsonify({"profile": data})
 
-@app.route('/health')
-def health():
-    return jsonify({"status": "ok"})
 
-# VULNERABILITY 2: SQL Injection (CWE-89)
-# The classic flaw. Unsanitized input directly into an f-string.
-@app.route('/user')
-def get_user():
-    user_id = request.args.get('id', '1')
-    conn = sqlite3.connect('database.db')
-    cursor = conn.cursor()
-    query = f"SELECT username, email, role FROM users WHERE id = {user_id}"
+# VULNERABILITY 3: Unsafe Deserialization (CWE-502)
+# Accepts pickled data from user input
+@app.route('/import', methods=['POST'])
+def import_data():
+    data = request.data
     try:
-        cursor.execute(query)
-        users = cursor.fetchall()
-        return jsonify({"users": users})
+        obj = pickle.loads(data)  # Arbitrary code execution possible
+        return jsonify({"status": "Imported", "data": str(obj)})
     except Exception as e:
         return jsonify({"error": str(e)})
 
-# VULNERABILITY 3: Command Injection (CWE-78)
-# Takes a target IP and pings it, but doesn't sanitize the input.
-# Attacker can send: ?ip=8.8.8.8; cat /etc/passwd
-@app.route('/ping')
-def ping_server():
-    target_ip = request.args.get('ip', '127.0.0.1')
-    # Unsafe subprocess call using shell=True
-    command = f"ping -c 1 {target_ip}"
-    try:
-        output = subprocess.check_output(command, shell=True, text=True)
-        return jsonify({"output": output})
-    except subprocess.CalledProcessError as e:
-        return jsonify({"error": "Ping failed"})
 
-# VULNERABILITY 4: Local File Inclusion / Path Traversal (CWE-22)
-# Allows reading local files. Doesn't sanitize for '../'
-# Attacker can send: ?filename=../../../../etc/passwd
-@app.route('/read')
-def read_config():
-    filename = request.args.get('filename', 'default.cfg')
-    base_dir = "configs/"
-    
-    # Unsafe path concatenation
-    file_path = base_dir + filename
-    
-    try:
-        with open(file_path, 'r') as f:
-            content = f.read()
-        return jsonify({"content": content})
-    except FileNotFoundError:
-        return jsonify({"error": "File not found"})
+# VULNERABILITY 4: Command Injection (CWE-78)
+@app.route('/dns')
+def dns_lookup():
+    domain = request.args.get('domain', 'example.com')
+    cmd = f"nslookup {domain}"
+    result = subprocess.getoutput(cmd)  # shell execution
+    return jsonify({"result": result})
 
-# VULNERABILITY 5: Reflected Cross-Site Scripting (XSS) (CWE-79)
-# Directly rendering user input into HTML without escaping it.
-# Attacker can send: ?name=<script>alert('XSS')</script>
-@app.route('/greet')
-def greet_user():
-    name = request.args.get('name', 'Guest')
-    # Unsafe template rendering
-    html_template = f"<h1>Hello, {name}!</h1><p>Welcome to our platform.</p>"
-    return render_template_string(html_template)
+
+# VULNERABILITY 5: Open Redirect (CWE-601)
+@app.route('/redirect')
+def unsafe_redirect():
+    url = request.args.get('next', '/')
+    return redirect(url)
+
+
+# VULNERABILITY 6: Sensitive Data Exposure (CWE-200)
+# Dumps environment variables
+@app.route('/debug/env')
+def debug_env():
+    return jsonify(dict(os.environ))
+
+
+# VULNERABILITY 7: Weak Authentication Logic (CWE-287)
+users = {
+    "admin": "password123",
+    "user": "1234"
+}
+
+@app.route('/login', methods=['POST'])
+def login():
+    username = request.form.get('username')
+    password = request.form.get('password')
+
+    # No hashing, plaintext comparison
+    if username in users and users[username] == password:
+        session['user'] = username
+        return jsonify({"message": "Logged in"})
+    return jsonify({"error": "Invalid credentials"}), 401
+
+
+# VULNERABILITY 8: Missing Authorization Check
+@app.route('/admin')
+def admin_panel():
+    # Should check role but doesn't
+    return jsonify({"secret": "Admin panel data"})
+
+
+# VULNERABILITY 9: File Upload without Validation (CWE-434)
+@app.route('/upload', methods=['POST'])
+def upload_file():
+    file = request.files['file']
+    filepath = os.path.join("uploads", file.filename)  # No sanitization
+    file.save(filepath)
+    return jsonify({"message": f"Saved to {filepath}"})
+
+
+# VULNERABILITY 10: Directory Listing / Info Leak
+@app.route('/files')
+def list_files():
+    files = os.listdir("uploads")
+    return jsonify({"files": files})
+
+
+def init_db():
+    conn = sqlite3.connect("database.db")
+    cursor = conn.cursor()
+    cursor.execute("CREATE TABLE IF NOT EXISTS users (id INTEGER, username TEXT, email TEXT)")
+    cursor.execute("INSERT INTO users VALUES (1, 'admin', 'admin@test.com')")
+    cursor.execute("INSERT INTO users VALUES (2, 'john', 'john@test.com')")
+    conn.commit()
+    conn.close()
+
 
 if __name__ == '__main__':
-    # Ensure DB exists and config folder exists for testing
-    if not os.path.exists('configs'):
-        os.makedirs('configs')
-        with open('configs/default.cfg', 'w') as f:
-            f.write("theme=dark\nversion=1.0")
-    
+    if not os.path.exists("uploads"):
+        os.makedirs("uploads")
+
     init_db()
-    app.run(port=5000)
+    app.run(debug=True, port=5001)
