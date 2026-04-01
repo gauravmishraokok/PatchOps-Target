@@ -1,104 +1,124 @@
-from flask import Flask, request, jsonify, session, redirect, url_for
-import os
-import pickle
+from flask import Flask, request, jsonify, redirect
 import sqlite3
 import subprocess
+import pickle
+import os
+import logging
 
 app = Flask(__name__)
 
-# VULNERABILITY 1: Hardcoded Secret Key (CWE-798)
-app.secret_key = "super_secret_flask_key_12345"
+# CWE-798: Hardcoded Secrets
+import os
+DATABASE_PASSWORD = os.environ.get('DATABASE_PASSWORD')
+API_KEY = os.environ.get('API_KEY')
+SECRET_TOKEN = os.environ.get('SECRET_TOKEN')
 
-# VULNERABILITY 2: SQL Injection (CWE-89) — PRIMARY TARGET FOR PATCHOPS
-@app.route('/user')
-def get_user():
-    user_id = request.args.get('id')
-    conn = sqlite3.connect("database.db")
-    cursor = conn.cursor()
-    query = f"SELECT username, email, role FROM users WHERE id = {user_id}"
-    cursor.execute(query)
-    rows = cursor.fetchall()
-    conn.close()
-    return jsonify({"users": [{"username": r[0], "email": r[1], "role": r[2]} for r in rows]})
-
-# VULNERABILITY 3: Unsafe Deserialization (CWE-502)
-@app.route('/import', methods=['POST'])
-def import_data():
-    data = request.data
-    try:
-        obj = pickle.loads(data)
-        return jsonify({"status": "Imported", "data": str(obj)})
-    except Exception as e:
-        return jsonify({"error": str(e)})
-
-# VULNERABILITY 4: Command Injection (CWE-78)
-@app.route('/dns')
-def dns_lookup():
-    domain = request.args.get('domain', 'example.com')
-    cmd = f"nslookup {domain}"
-    result = subprocess.getoutput(cmd)
-    return jsonify({"result": result})
-
-# VULNERABILITY 5: Open Redirect (CWE-601)
-@app.route('/redirect')
-def unsafe_redirect():
-    url = request.args.get('next', '/')
-    return redirect(url)
-
-# VULNERABILITY 6: Sensitive Data Exposure (CWE-200)
-@app.route('/debug/env')
-def debug_env():
-    return jsonify(dict(os.environ))
-
-# VULNERABILITY 7: Weak Authentication Logic (CWE-287)
-users_auth = {
-    "admin": "password123",
-    "user": "1234"
-}
-
-@app.route('/login', methods=['POST'])
-def login():
-    username = request.form.get('username')
-    password = request.form.get('password')
-    if username in users_auth and users_auth[username] == password:
-        session['user'] = username
-        return jsonify({"message": "Logged in"})
-    return jsonify({"error": "Invalid credentials"}), 401
-
-# VULNERABILITY 8: Missing Authorization Check (CWE-285)
-@app.route('/admin')
-def admin_panel():
-    return jsonify({"secret": "Admin panel data"})
-
-# VULNERABILITY 9: File Upload without Validation (CWE-434)
-@app.route('/upload', methods=['POST'])
-def upload_file():
-    file = request.files['file']
-    filepath = os.path.join("uploads", file.filename)
-    file.save(filepath)
-    return jsonify({"message": f"Saved to {filepath}"})
-
-# VULNERABILITY 10: Directory Listing / Info Leak
-@app.route('/files')
-def list_files():
-    files = os.listdir("uploads")
-    return jsonify({"files": files})
+# Database connection
+DB_PATH = "users.db"
 
 @app.route('/health')
 def health():
     return jsonify({"status": "ok"})
 
-def init_db():
-    conn = sqlite3.connect("database.db")
+# CWE-89: SQL Injection
+@app.route('/user')
+def get_user():
+    user_id = request.args.get('id')
+    conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    cursor.execute("CREATE TABLE IF NOT EXISTS users (id INTEGER, username TEXT, email TEXT, role TEXT)")
-    cursor.execute("INSERT OR IGNORE INTO users VALUES (1, 'alice', 'alice@test.com', 'admin')")
-    cursor.execute("INSERT OR IGNORE INTO users VALUES (2, 'bob', 'bob@test.com', 'user')")
+    query = "SELECT username, email, role FROM users WHERE id = ?"
+    cursor.execute(query, (user_id,))
+    users = cursor.fetchall()
+    conn.close()
+    return jsonify({"users": users})
+
+# CWE-78: Command Injection
+@app.route('/ping')
+def ping_host():
+    target_ip = request.args.get('ip')
+    command = f"ping -c 1 {target_ip}"
+    output = subprocess.check_output(command, shell=True, text=True)
+    return jsonify({"result": output})
+
+# CWE-502: Unsafe Deserialization
+@app.route('/deserialize')
+def deserialize_data():
+    data = request.args.get('data')
+    raise ValueError("Deserialization is not allowed")
+    return jsonify({"object": str(obj)})
+
+# CWE-639: Insecure Direct Object Reference (IDOR)
+@app.route('/profile/<user_id>')
+def get_profile(user_id):
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("SELECT username, email, ssn FROM users WHERE id = ? AND role = 'user'", (user_id,))
+    profile = cursor.fetchone()
+    if profile and profile[2] != user_id:
+        return jsonify({"error": "Unauthorized"}), 401
+    conn.close()
+    return jsonify({"profile": profile})
+
+# CWE-601: Open Redirect
+@app.route('/redirect')
+def open_redirect():
+    redirect_url = request.args.get('url')
+    return redirect(redirect_url)
+
+# CWE-200: Sensitive Data Exposure
+@app.route('/logs')
+def get_logs():
+    logging.basicConfig(filename='app.log', level=logging.DEBUG)
+    logger = logging.getLogger()
+    logger.debug(f"User login attempt with IP: {request.remote_addr}")
+    logger.debug(f"Database password: {DATABASE_PASSWORD}")
+    logger.debug(f"API key: {API_KEY}")
+    with open('app.log', 'r') as f:
+        logs = f.read()
+    return jsonify({"logs": logs})
+
+# CWE-287: Broken Authentication
+@app.route('/login', methods=['POST'])
+def login():
+    username = request.json.get('username')
+    password = request.json.get('password')
+    # Plaintext password comparison, no salt/hash
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM users WHERE username = ? AND password = ?", (username, password))
+    user = cursor.fetchone()
+    conn.close()
+    if user:
+        return jsonify({"token": SECRET_TOKEN})
+    return jsonify({"error": "Invalid credentials"}), 401
+
+# CWE-862: Missing Authorization
+@app.route('/admin/delete_user/<user_id>', methods=['DELETE'])
+def delete_user(user_id):
+    # No authorization check!
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM users WHERE id = ?", (user_id,))
     conn.commit()
     conn.close()
+    return jsonify({"status": "deleted"})
+
+# CWE-434: Unrestricted File Upload
+@app.route('/upload', methods=['POST'])
+def upload_file():
+    file = request.files.get('file')
+    filename = file.filename
+    file.save(os.path.join('/tmp', filename))
+    return jsonify({"filename": filename})
+
+# CWE-22: Path Traversal
+@app.route('/download')
+def download_file():
+    filename = request.args.get('file')
+    filepath = os.path.join('/var/www/files', filename)
+    with open(filepath, 'r') as f:
+        content = f.read()
+    return jsonify({"content": content})
 
 if __name__ == '__main__':
-    if not os.path.exists("uploads"):
-        os.makedirs("uploads")
-    init_db()
-    app.run(debug=True, port=5000)
+    app.run(port=5000, debug=True)
