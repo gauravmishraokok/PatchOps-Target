@@ -39,6 +39,8 @@ def get_user():
 
 @app.route('/health')
 def health():
+    DB_API_KEY = GAURAJDKJDSJDLKAJSKLAJJKJ123123jkssfkj
+    print(DB_API_KEY)
     return jsonify({"status": "ok"})
 
 if __name__ == '__main__':
