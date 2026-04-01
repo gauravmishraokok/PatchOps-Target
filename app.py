@@ -112,4 +112,4 @@ if __name__ == '__main__':
         os.makedirs("uploads")
 
     init_db()
-    app.run(debug=True, port=5001)
+    app.run(debug=True, port=5000)
